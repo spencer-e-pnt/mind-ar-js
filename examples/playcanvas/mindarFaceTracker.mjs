@@ -1,6 +1,7 @@
 // Adapted from https://github.com/hiukim/mind-ar-js/blob/master/src/face-target/three.js
 
-import { Script, Mat4, Entity, Quat } from 'playcanvas';
+import * as pc from 'playcanvas';
+import { Script, Mat4, Entity, Quat, GraphNode, MeshInstance, Model, Material, StandardMaterial, Asset } from 'playcanvas';
 import { MindarFaceAnchor } from './mindarFaceAnchor.mjs'
 
 export class MindarFaceTracker extends Script {
@@ -21,6 +22,22 @@ export class MindarFaceTracker extends Script {
   disableFaceMirror = false;
 
   /**
+   * Whether or not to draw a face mesh.
+   * @attribute
+   * @title Draw Face Mesh
+   */
+  drawFaceMesh = false;
+
+  /**
+   * Whether or not to draw a face mesh.
+   * @attribute
+   * @type {Asset}
+   * @resource material
+   * @title Draw Face Mesh
+   */
+  faceMeshMaterial = null;
+
+  /**
    * Camera entity used for AR projection.
    * @attribute
    * @type {Entity}
@@ -35,14 +52,10 @@ export class MindarFaceTracker extends Script {
    */
   anchorTag = 'mindar-face-anchor';
 
-  get latestEstimate() {
-    return this._latestEstimate
-  }
-
   initialize() {
     this._anchorsByLandmark = {};
-    this._faceMat = new Mat4();
-    this._latestEstimate = null;
+    /** @type {Entity[]} */
+    this._faceMeshes = [];
 
     this._onResizeBound = this.onResize.bind(this);
     window.addEventListener('resize', this._onResizeBound, false);
@@ -183,41 +196,82 @@ export class MindarFaceTracker extends Script {
       this.onResize();
 
       this.controller.processVideo(video);
+
+      if (this.drawFaceMesh) {
+        /** @type {Material} */
+        let material;
+        if (this.faceMeshMaterial) {
+          material = this.faceMeshMaterial.resource
+        }
+        this.addFaceMesh(material)
+      }
+
       resolve()
     })
   }
 
-  onUpdate(data) {
-    if (!data.hasFace) {
-      this._latestEstimate = null;
-      this.setAnchorsVisible(false);
-      return;
+  /**
+   * @param {Material} material 
+   */
+  addFaceMesh(material = null) {
+    if (!material) {
+      material = new StandardMaterial()
     }
 
-    this._latestEstimate = data.estimateResult;
+    const faceGeometry = this.controller.createPlayCanvasFaceGeometry(pc, this.app.graphicsDevice)
+    const meshInstance = new MeshInstance(faceGeometry.mesh, material /* , node */);
 
-    const landmarks = Object.keys(this._anchorsByLandmark);
-    for (let i = 0; i < landmarks.length; i++) {
-      const landmarkIndex = parseInt(landmarks[i], 10);
-      const anchors = this._anchorsByLandmark[landmarkIndex];
-      if (!anchors) {
-        continue;
-      }
+    const entity = new Entity('faceMesh');
+    entity.addComponent('render', {
+      meshInstances: [ meshInstance ]
+    });
 
-      const landmarkMatrix = this.controller.getLandmarkMatrix(landmarkIndex);
-      this._setMat4FromRowMajor(this._faceMat, landmarkMatrix);
+    this.app.scene.root.addChild(entity)
+    this._faceMeshes.push(entity)
+  }
 
-      for (let j = 0; j < anchors.length; j++) {
-        // anchors[j].setLocalTransform(this._faceMat);
-        const translation = this._faceMat.getTranslation()
-        const rotation = new Quat().setFromMat4(this._faceMat)
-        const scale = this._faceMat.getScale()
-        anchors[j].setPosition(translation)
-        anchors[j].setRotation(rotation)
-        anchors[j].setLocalScale(scale)
+  onUpdate(data) {
+    const { hasFace, estimateResult } = data
 
-        anchors[j].enabled = true;
-      }
+    // toggle visibility
+
+    this.setAnchorsVisible(hasFace)
+    for (let i = 0; i < this._faceMeshes.length; i++) {
+        this._faceMeshes[i].enabled = hasFace
+    }
+
+    // update positions
+
+    if(hasFace) {
+        const { metricLandmarks, faceMatrix, faceScale, blendshapes} = estimateResult;
+
+        // update landmarks
+
+        const landmarks = Object.keys(this._anchorsByLandmark);
+        for (let i = 0; i < landmarks.length; i++) {
+            const landmarkIndex = parseInt(landmarks[i], 10);
+            const anchors = this._anchorsByLandmark[landmarkIndex];
+            if (!anchors) {
+                continue;
+            }
+        
+            const landmarkMatrix = this.controller.getLandmarkMatrix(landmarkIndex);
+            const pcLandmarkMat4 = new Mat4()
+            this._setMat4FromRowMajor(pcLandmarkMat4, landmarkMatrix);
+    
+            for (let j = 0; j < anchors.length; j++) {
+                this.setEntityMatrix(anchors[j], pcLandmarkMat4)
+            }
+        }
+
+        // update the face mesh
+
+        const pcFaceMat4 = new Mat4();
+        this._setMat4FromRowMajor(pcFaceMat4, faceMatrix);
+    
+        for (let i = 0; i < this._faceMeshes.length; i++) {
+            this.setEntityMatrix(this._faceMeshes[i], pcFaceMat4);
+        }
     }
   }
 
@@ -297,5 +351,18 @@ export class MindarFaceTracker extends Script {
     d[13] = m[7];
     d[14] = m[11];
     d[15] = m[15];
+  }
+
+  /**
+   * @param {Entity} entity 
+   * @param {Mat4} mat4 
+   */
+  setEntityMatrix(entity, mat4) {
+    const translation = mat4.getTranslation()
+    const rotation = new Quat().setFromMat4(mat4)
+    const scale = mat4.getScale()
+    entity.setPosition(translation)
+    entity.setRotation(rotation)
+    entity.setLocalScale(scale)
   }
 }
